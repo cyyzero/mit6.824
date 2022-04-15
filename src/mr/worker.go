@@ -9,6 +9,7 @@ import (
 	"net/rpc"
 	"os"
 	"sort"
+	"syscall"
 	"time"
 )
 
@@ -157,33 +158,8 @@ func saveIntermediateKVs(kvs []KeyValue, taskID int, nReduce int) {
 		if err != nil {
 			log.Fatalf("rename from %v to %v failed", file.Name(), newName)
 		}
-		log.Printf("%v file is created", newName)
 	}
 }
-
-// load intermediate key/values
-func loadIntermediateKVs(taskID int, nMap int) []KeyValue {
-	kvs := []KeyValue{}
-	for i := 0; i < nMap; i++ {
-		fileName := fmt.Sprintf("mr-%d-%d", i, taskID)
-		file, err := os.Open(fileName)
-		if err != nil {
-			log.Fatalf("file %v open failed %v", fileName, err)
-		}
-		dec := json.NewDecoder(file)
-		for {
-			var kv KeyValue
-			if err := dec.Decode(&kv); err != nil {
-				break
-			}
-			kvs = append(kvs, kv)
-		}
-		file.Close()
-		log.Printf("%v file is read", fileName)
-	}
-	return kvs
-}
-
 
 // do map work
 func doMap(taskID int, nReduce int, filename string, mapf func(string, string) []KeyValue) error {
@@ -196,13 +172,35 @@ func doMap(taskID int, nReduce int, filename string, mapf func(string, string) [
 	return nil
 }
 
-// do reduce work
-func doReduce(taskID int, nMap int, reducef func(string, []string) string) error {
-	kvs := loadIntermediateKVs(taskID, nMap)
-	sort.Sort(ByKey(kvs))
-	ofile, err := os.Create(fmt.Sprintf("mr-out-%d", taskID))
+// load intermediate key/values
+func loadIntermediateKVs(taskID int, nMap int) []KeyValue {
+	kvs := []KeyValue{}
+	for i := 0; i < nMap; i++ {
+		fileName := fmt.Sprintf("mr-%d-%d", i, taskID)
+		file, err := os.Open(fileName)
+		if err != nil {
+			if e, ok := err.(*os.PathError); !ok || e.Err != syscall.ENOENT {
+				log.Fatalf("file %v open failed %v", fileName, err)
+			}
+		}
+		dec := json.NewDecoder(file)
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err != nil {
+				break
+			}
+			kvs = append(kvs, kv)
+		}
+		file.Close()
+	}
+	return kvs
+}
+
+// 
+func saveFinalKVs(fileName string, kvs []KeyValue, reducef func(string, []string) string) {
+	ofile, err := os.CreateTemp("", "")
 	if err != nil {
-		log.Fatalf("open file mr-out-%d failed, %e", taskID, err)
+		log.Fatalf("create tempfile failed, %e", err)
 	}
 	defer ofile.Close()
 	//
@@ -224,6 +222,14 @@ func doReduce(taskID int, nMap int, reducef func(string, []string) string) error
 		fmt.Fprintf(ofile, "%v %v\n", kvs[i].Key, output)
 		i = j
 	}
+	os.Rename(ofile.Name(), fileName)
+}
+
+// do reduce work
+func doReduce(taskID int, nMap int, reducef func(string, []string) string) error {
+	kvs := loadIntermediateKVs(taskID, nMap)
+	sort.Sort(ByKey(kvs))
+	saveFinalKVs(fmt.Sprintf("mr-out-%d", taskID), kvs, reducef)
 	return nil
 }
 
@@ -231,7 +237,7 @@ func doReduce(taskID int, nMap int, reducef func(string, []string) string) error
 func notifyTaskFinished(t TaskType, id int) {
 	args := FinishTaskArgs{t, id}
 	reply := FinishTaskReply{}
-	
+
 	ok := call("Coordinator.FinishTask", &args, &reply)
 	if !ok {
 		log.Fatal("call Coordinator.FinishTask failed")
