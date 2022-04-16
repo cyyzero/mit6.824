@@ -94,18 +94,21 @@ func requestTask(mapf func(string, string) []KeyValue,
 	if ok {
 		switch reply.Type {
 		case MapType:
-			err := doMap(reply.ID, reply.NReduce, reply.Filename, mapf)
+			files, err := doMap(reply.ID, reply.NReduce, reply.Filenames[0], mapf)
 			if err == nil {
-				notifyTaskFinished(reply.Type, reply.ID)
+				args := FinishTaskArgs{MapType, reply.ID, files}
+				callFinishTask(&args)
 			}
 		case ReduceType:
-			err := doReduce(reply.ID, reply.NMap, reducef)
+			err := doReduce(reply.ID, reply.Filenames, reducef)
 			if err == nil {
-				notifyTaskFinished(reply.Type, reply.ID)
+				args := FinishTaskArgs{ReduceType, reply.ID, nil}
+				callFinishTask(&args)
 			}
-		case UnknownType:
-			fmt.Println("there is no unrunning tasks")
+		case SleepType:
 			time.Sleep(1 * time.Second)
+		case ExitType:
+			os.Exit(0)
 		default:
 			log.Fatalf("unknown taks type %v", reply.Type)
 		}
@@ -131,12 +134,13 @@ func readFileContent(filename string) (string, error) {
 }
 
 // save intermediate key/values in file mr-X-Y
-func saveIntermediateKVs(kvs []KeyValue, taskID int, nReduce int) {
+func saveIntermediateKVs(kvs []KeyValue, taskID int, nReduce int) []string {
 	kvsBucket := make([][]KeyValue, nReduce)
 	for i := range kvs {
 		idx := ihash(kvs[i].Key) % nReduce
 		kvsBucket[idx] = append(kvsBucket[idx], kvs[i])
 	}
+	files := make([]string, nReduce)
 	for i := 0; i < nReduce; i++ {
 		if (len(kvsBucket[i]) == 0) {
 			continue
@@ -158,29 +162,30 @@ func saveIntermediateKVs(kvs []KeyValue, taskID int, nReduce int) {
 		if err != nil {
 			log.Fatalf("rename from %v to %v failed", file.Name(), newName)
 		}
+		files[i] = newName
 	}
+	return files
 }
 
 // do map work
-func doMap(taskID int, nReduce int, filename string, mapf func(string, string) []KeyValue) error {
+func doMap(taskID int, nReduce int, filename string, mapf func(string, string) []KeyValue) ([]string, error) {
 	content, err := readFileContent(filename)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	kvs := mapf(filename, content)
-	saveIntermediateKVs(kvs, taskID, nReduce)
-	return nil
+	filenames := saveIntermediateKVs(kvs, taskID, nReduce)
+	return filenames, nil
 }
 
 // load intermediate key/values
-func loadIntermediateKVs(taskID int, nMap int) []KeyValue {
+func loadIntermediateKVs(taskID int, files []string) []KeyValue {
 	kvs := []KeyValue{}
-	for i := 0; i < nMap; i++ {
-		fileName := fmt.Sprintf("mr-%d-%d", i, taskID)
-		file, err := os.Open(fileName)
+	for _, filename := range files {
+		file, err := os.Open(filename)
 		if err != nil {
 			if e, ok := err.(*os.PathError); !ok || e.Err != syscall.ENOENT {
-				log.Fatalf("file %v open failed %v", fileName, err)
+				log.Fatalf("file %v open failed %v", filename, err)
 			}
 		}
 		dec := json.NewDecoder(file)
@@ -226,19 +231,17 @@ func saveFinalKVs(fileName string, kvs []KeyValue, reducef func(string, []string
 }
 
 // do reduce work
-func doReduce(taskID int, nMap int, reducef func(string, []string) string) error {
-	kvs := loadIntermediateKVs(taskID, nMap)
+func doReduce(taskID int, files []string, reducef func(string, []string) string) error {
+	kvs := loadIntermediateKVs(taskID, files)
 	sort.Sort(ByKey(kvs))
 	saveFinalKVs(fmt.Sprintf("mr-out-%d", taskID), kvs, reducef)
 	return nil
 }
 
 // notify master a task is finish
-func notifyTaskFinished(t TaskType, id int) {
-	args := FinishTaskArgs{t, id}
+func callFinishTask(args *FinishTaskArgs) {
 	reply := FinishTaskReply{}
-
-	ok := call("Coordinator.FinishTask", &args, &reply)
+	ok := call("Coordinator.FinishTask", args, &reply)
 	if !ok {
 		log.Fatal("call Coordinator.FinishTask failed")
 	}

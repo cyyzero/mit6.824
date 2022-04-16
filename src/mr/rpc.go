@@ -17,7 +17,8 @@ import "strconv"
 const (
 	MapType TaskType = iota
 	ReduceType
-	UnknownType
+	SleepType
+	ExitType
 )
 
 type TaskType int
@@ -37,13 +38,14 @@ type RequestTaskReply struct {
 	Type TaskType
 	ID int
 	NReduce int
-	Filename string
+	Filenames []string
 	NMap int
 }
 
 type FinishTaskArgs struct {
 	Type TaskType
 	ID int
+	IntermediateFiles []string
 }
 
 type FinishTaskReply struct {

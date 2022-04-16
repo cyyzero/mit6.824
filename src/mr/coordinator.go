@@ -22,11 +22,11 @@ const (
 type Coordinator struct {
 	Files []string
 	NReduce int
+	IntermediateFiles  [][]string
 	MapStatus, ReduceStatus []TaskStatus
 	CurMapIdx, CurReduceIdx int // used for round-robin
-	MapMutex, ReduceMutex sync.Mutex
+	MapMutex, ReduceMutex, IntermediateFilesMutex sync.Mutex
 	done chan struct{}
-	// finishAll bool
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -47,7 +47,7 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 		reply.Type = MapType
 		reply.ID = mapID
 		reply.NReduce = c.NReduce
-		reply.Filename = c.Files[mapID]
+		reply.Filenames = []string{c.Files[mapID]}
 		go c.runTaskTimeout(MapType, mapID)
 		return nil
 	}
@@ -55,16 +55,17 @@ func (c *Coordinator) RequestTask(args *RequestTaskArgs, reply *RequestTaskReply
 		reply.Type = ReduceType
 		reply.ID = reduceID
 		reply.NMap = len(c.Files)
+		// Do not need to lock because reduce tasks are all after map tasks
+		reply.Filenames = c.IntermediateFiles[reduceID]
 		go c.runTaskTimeout(ReduceType, reduceID)
 		return nil
 	}
 	if c.isMapTaskAllFinished() && c.isReduceTaskAllFinished() {
-		// c.finishAll = true
+		reply.Type = ExitType
 		return nil
 	}
 	// mapID == -1 && reduceID == -1, means all tasks are running or finished
-	reply.Type = UnknownType
-	reply.ID = -1
+	reply.Type = SleepType
 	return nil
 }
 
@@ -77,6 +78,7 @@ func (c* Coordinator) FinishTask(args *FinishTaskArgs, reply *FinishTaskReply) e
 			c.MapMutex.Lock()
 			c.MapStatus[id] = TaskFinished
 			c.MapMutex.Unlock()
+			c.appendIntermediateFiles(args.IntermediateFiles)
 			log.Printf("map task %d is finished", id)
 		}
 	case ReduceType:
@@ -163,6 +165,17 @@ func (c *Coordinator) getUnRunningReduceId() int {
 	return -1
 }
 
+func (c *Coordinator) appendIntermediateFiles(files []string) {
+	c.IntermediateFilesMutex.Lock()
+	for i := range c.IntermediateFiles {
+		if i >= len(files) {
+			break
+		}
+		c.IntermediateFiles[i] = append(c.IntermediateFiles[i], files[i])
+	}
+	c.IntermediateFilesMutex.Unlock()
+}
+
 // wait 
 func (c *Coordinator) runTaskTimeout(t TaskType, id int) {
 	timeout := time.After(10 * time.Second)
@@ -224,8 +237,9 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
 	c.Files = files
 	c.NReduce = nReduce
+	c.IntermediateFiles = make([][]string, nReduce)
 	c.MapStatus = make([]TaskStatus, len(files))
-	c.ReduceStatus = make([]TaskStatus, nReduce);
+	c.ReduceStatus = make([]TaskStatus, nReduce)
 	c.done = make(chan struct{}, 1)
 	c.server()
 	return &c
