@@ -14,12 +14,42 @@ import "strconv"
 // and reply for an RPC.
 //
 
+const (
+	MapType TaskType = iota
+	ReduceType
+	SleepType
+	ExitType
+)
+
+type TaskType int
+
 type ExampleArgs struct {
 	X int
 }
 
 type ExampleReply struct {
 	Y int
+}
+
+type RequestTaskArgs struct {
+}
+
+type RequestTaskReply struct {
+	Type TaskType
+	ID int
+	NReduce int
+	Filenames []string
+	NMap int
+}
+
+type FinishTaskArgs struct {
+	Type TaskType
+	ID int
+	IntermediateFiles []string
+}
+
+type FinishTaskReply struct {
+	RequestTaskReply
 }
 
 // Add your RPC definitions here.
